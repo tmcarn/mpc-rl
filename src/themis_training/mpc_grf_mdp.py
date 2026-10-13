@@ -54,7 +54,14 @@ class LocoMPCCommandCfg(CommandTermCfg):
     mpc_dt: float = 0.07
     mpc_horizon: int = 10
     mass: float = 37.0
+    # Whole-body inertia about the CoM (kg·m²); maps ω ↔ angular momentum.
+    inertia: tuple[tuple[float, ...], ...] = _I_BODY
     hip_width: float = 0.1
+
+    # Sole extents w.r.t. the foot site (MPC CoP constraints).
+    foot_x_toe: float = 0.12
+    foot_x_heel: float = 0.06
+    foot_y_half: float = 0.04
 
     gait_period: float = 0.9
     duty_factor: float = 0.5
@@ -102,13 +109,16 @@ class LocoMPCCommand(CommandTerm):
         )
 
         self._I_approx = torch.tensor(
-            _I_BODY, device=env.device, dtype=torch.float32
+            cfg.inertia, device=env.device, dtype=torch.float32
         )
 
         mpc_cfg = MPCConfig(
             N=cfg.mpc_horizon,
             dt=cfg.mpc_dt,
             mass=cfg.mass,
+            foot_x_toe=cfg.foot_x_toe,
+            foot_x_heel=cfg.foot_x_heel,
+            foot_y_half=cfg.foot_y_half,
             solver_type=cfg.solver_type,
             unconstrained=cfg.unconstrained,
         )
@@ -985,6 +995,50 @@ def cop_forward_reward(
 
     return 0.5 * (left_reward + right_reward)
 
+def cop_forward_contact_pos_reward(
+    env: "ManagerBasedRlEnv",
+    asset_cfg: "SceneEntityCfg",
+    left_sensor_name: str = "left_sole_contact",
+    right_sensor_name: str = "right_sole_contact",
+    foot_x_toe: float = 0.09,
+    foot_x_heel: float = 0.08,
+    target_ratio: float = 0.5,
+    sigma: float = 0.25,
+) -> Tensor:
+    """:func:`cop_forward_reward` for soles without separate heel/toe geoms.
+
+    Computes each foot's Center-of-Pressure from the contact positions and
+    normal forces of its sole geoms (sensors with ``fields=("force", "pos")``),
+    projects it onto the foot's heading, and maps it to the same heel→toe
+    ratio ``(x_cop + heel) / (toe + heel)`` ∈ [0, 1] that the heel/toe
+    force split gives.  ``asset_cfg.site_names`` = (left, right) sole sites.
+    """
+    robot = env.scene[asset_cfg.name]
+    site_pos = robot.data.site_pos_w[:, asset_cfg.site_ids, :]    # [B, 2, 3]
+    site_quat = robot.data.site_quat_w[:, asset_cfg.site_ids, :]  # [B, 2, 4]
+    w, x, y, z = site_quat.unbind(dim=-1)
+    # Foot x-axis in world, flattened to the ground plane.
+    fwd = torch.stack([1 - 2 * (y * y + z * z), 2 * (x * y + w * z)], dim=-1)
+    fwd = fwd / fwd.norm(dim=-1, keepdim=True).clamp(min=1e-6)    # [B, 2, 2]
+
+    eps = 1.0
+    rewards = []
+    for i, name in enumerate((left_sensor_name, right_sensor_name)):
+        sensor: ContactSensor = env.scene[name]
+        assert sensor.data.force is not None and sensor.data.pos is not None
+        fn = sensor.data.force[:, :, 0].abs()  # contact-frame normal force
+        rel = sensor.data.pos[:, :, :2] - site_pos[:, i : i + 1, :2]
+        x_c = (rel * fwd[:, i : i + 1, :]).sum(dim=-1)              # [B, S]
+        total = fn.sum(dim=-1)
+        x_cop = (fn * x_c).sum(dim=-1) / total.clamp(min=eps)
+        ratio = (x_cop + foot_x_heel) / (foot_x_toe + foot_x_heel)
+        err = ratio - target_ratio
+        asym = torch.where(err < 0, 2.0 * err, err)
+        r = torch.exp(-asym.pow(2) / (sigma ** 2))
+        rewards.append(torch.where(total > eps, r, torch.ones_like(r)))
+
+    return 0.5 * (rewards[0] + rewards[1])
+
 @dataclass(kw_only=True)
 class LocoManipMPCCommandCfg(LocoMPCCommandCfg):
     """Configuration for :class:`LocoManipMPCCommand`."""
@@ -1022,6 +1076,9 @@ class LocoManipMPCCommand(LocoMPCCommand):
             N=cfg.mpc_horizon,
             dt=cfg.mpc_dt,
             mass=cfg.mass,
+            foot_x_toe=cfg.foot_x_toe,
+            foot_x_heel=cfg.foot_x_heel,
+            foot_y_half=cfg.foot_y_half,
             mu_hand=cfg.mu_hand,
             f_hand_max=cfg.f_hand_max,
             R_f_hand=cfg.R_f_hand,

@@ -595,18 +595,16 @@ def arm_joint_deviation(
     env: "ManagerBasedRlEnv",
     max_deviation_rad: float = 1.2,
     robot_name: str = "robot",
+    joint_names: tuple[str, ...] = (
+        r".*SHOULDER.*", r".*ELBOW.*", r".*WRIST.*", r".*HEAD.*",
+    ),
 ) -> Tensor:
     """Terminate when any arm or neck joint deviates too far from default."""
     robot = env.scene[robot_name]
     q = robot.data.joint_pos
     q_default = robot.data.default_joint_pos
     if not hasattr(env, "_arm_neck_joint_ids"):
-        ids, _ = robot.find_joints(
-            [
-                r".*SHOULDER.*", r".*ELBOW.*", r".*WRIST.*", r".*HEAD.*",
-            ],
-            preserve_order=False,
-        )
+        ids, _ = robot.find_joints(list(joint_names), preserve_order=False)
         env._arm_neck_joint_ids = ids
     ids = env._arm_neck_joint_ids
     deviation = (q[:, ids] - q_default[:, ids]).abs()

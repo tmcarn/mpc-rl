@@ -1,12 +1,13 @@
-"""THEMIS velocity environment configurations."""
+"""MPC-guided velocity environment configurations (THEMIS, Unitree G1).
+
+Every builder takes a ``robot`` :class:`~themis_training.robots.RobotProfile`
+(default: THEMIS) that supplies all robot-specific names and parameters.
+"""
 from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 import torch
-from themis_training.themis.themis_constants import (
-  get_themis_robot_cfg,
-  JOINT_NAMES_EXPR,
-)
+from themis_training.robots import THEMIS, RobotProfile
 from themis_training import phase_mdp
 from themis_training import mpc_grf_mdp
 from themis_training.mpc_grf_mdp import LocoMPCCommandCfg, LocoManipMPCCommandCfg
@@ -83,23 +84,39 @@ def _gait_symmetry(
     cmd_mag = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
     alternating *= (cmd_mag > command_threshold).float()
   return alternating
-def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Create THEMIS rough terrain velocity configuration."""
+def _concat_matches(a: ContactMatch, b: ContactMatch) -> ContactMatch:
+  """Merge two same-mode matches into one (primaries in order a, b)."""
+  assert a.mode == b.mode and a.entity == b.entity
+  as_tuple = lambda p: (p,) if isinstance(p, str) else tuple(p)  # noqa: E731
+  return ContactMatch(
+    mode=a.mode, pattern=as_tuple(a.pattern) + as_tuple(b.pattern), entity=a.entity,
+  )
+def themis_rough_env_cfg(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """Create rough terrain velocity configuration."""
   cfg = make_velocity_env_cfg()
 
-  # Set raycast sensor frame to THEMIS base.
+  if robot.ccd_iterations is not None:
+    cfg.sim.mujoco.ccd_iterations = robot.ccd_iterations
+  if robot.contact_sensor_maxmatch is not None:
+    cfg.sim.contact_sensor_maxmatch = robot.contact_sensor_maxmatch
+  if robot.nconmax is not None:
+    cfg.sim.nconmax = robot.nconmax
+
+  # Set raycast sensor frame to the robot base.
   for sensor in cfg.scene.sensors or ():
     if sensor.name == "terrain_scan":
       assert isinstance(sensor, RayCastSensorCfg)
-      sensor.frame.name = "BASE_LINK"
+      sensor.frame.name = robot.root_body
 
-  cfg.scene.entities = {"robot": get_themis_robot_cfg()}
+  cfg.scene.entities = {"robot": robot.robot_cfg_fn()}
 
   # Foot sites for height / clearance tracking.
-  site_names = ("left_foot", "right_foot")
+  site_names = robot.foot_sites
 
-  # Foot geoms for ground contact sensor (mesh geoms named in XML).
-  geom_names = ("left_foot_collision", "right_foot_collision")
+  # Foot geoms for friction randomisation.
+  geom_names = robot.foot_friction_geoms
 
   if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
     cfg.scene.terrain.terrain_generator.curriculum = True
@@ -107,8 +124,8 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # --------------- actions ---------------
   cfg.actions["joint_pos"] = JointPositionActionCfg(
     entity_name="robot",
-    actuator_names=tuple(JOINT_NAMES_EXPR),
-    scale=0.5,
+    actuator_names=robot.joint_names,
+    scale=robot.action_scale,
     use_default_offset=True,
     preserve_order=True,
   )
@@ -117,32 +134,32 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["actor"].terms["joint_pos"] = ObservationTermCfg(
     func=mdp.joint_pos_rel,
     noise=Unoise(n_min=-0.01, n_max=0.01),
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=tuple(JOINT_NAMES_EXPR), preserve_order=True)},
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=robot.joint_names, preserve_order=True)},
   )
   cfg.observations["critic"].terms["joint_pos"] = ObservationTermCfg(
     func=mdp.joint_pos_rel,
     noise=Unoise(n_min=-0.01, n_max=0.01),
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=tuple(JOINT_NAMES_EXPR), preserve_order=True)},
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=robot.joint_names, preserve_order=True)},
   )
   cfg.observations["actor"].terms["joint_vel"] = ObservationTermCfg(
     func=mdp.joint_vel_rel,
     noise=Unoise(n_min=-1.5, n_max=1.5),
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=tuple(JOINT_NAMES_EXPR), preserve_order=True)},
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=robot.joint_names, preserve_order=True)},
   )
   cfg.observations["critic"].terms["joint_vel"] = ObservationTermCfg(
     func=mdp.joint_vel_rel,
     noise=Unoise(n_min=-1.5, n_max=1.5),
-    params={"asset_cfg": SceneEntityCfg("robot", joint_names=tuple(JOINT_NAMES_EXPR), preserve_order=True)},
+    params={"asset_cfg": SceneEntityCfg("robot", joint_names=robot.joint_names, preserve_order=True)},
   )
 
   # --------------- viewer ---------------
-  cfg.viewer.body_name = "BASE_LINK"
+  cfg.viewer.body_name = robot.upright_body
 
   # --------------- commands ---------------
   assert cfg.commands is not None
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-  twist_cmd.viz.z_offset = 1.45  # above the head (~1.18 m standing + margin)
+  twist_cmd.viz.z_offset = robot.command_viz_z
 
   # --------------- reward references ---------------
   cfg.observations["critic"].terms["foot_height"].params[
@@ -150,7 +167,7 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   ].site_names = site_names
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
-  cfg.events["base_com"].params["asset_cfg"].body_names = ("BASE_LINK",)
+  cfg.events["base_com"].params["asset_cfg"].body_names = (robot.upright_body,)
 
   # Domain randomization: ±20% PD gains 
   cfg.events["pd_gains"] = EventTermCfg(
@@ -177,7 +194,7 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Domain randomization: ±20% body inertia via pseudo-inertia parameterization.
   # alpha scales mass & inertia by e^(2α): α=-0.112 → 0.8×, α=0.091 → 1.2×.
-  # body_names=(".*",) covers all bodies including BASE_LINK.
+  # body_names=(".*",) covers all bodies including the base.
   cfg.events["body_inertia"] = EventTermCfg(
     mode="startup",
     func=dr.pseudo_inertia,
@@ -189,59 +206,14 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Pose reward: match default joint angles per-joint-group.
   # Tighter std keeps joints near nominal; looser allows natural motion.
-  cfg.rewards["pose"].params["asset_cfg"].joint_names = [
-    r".*HIP_YAW.*",
-    r".*HIP_ROLL.*",
-    r".*HIP_PITCH.*",
-    r".*KNEE.*",
-    r".*ANKLE.*",
-    r".*SHOULDER.*",
-    r".*ELBOW.*",
-    r".*WRIST.*",
-    r".*HEAD.*",
-  ]
-  cfg.rewards["pose"].params["std_standing"] = {
-    # Lower body
-    r".*HIP_PITCH.*":  0.025,
-    r".*HIP_ROLL.*":   0.15,
-    r".*HIP_YAW.*":    0.15,
-    r".*KNEE.*":       0.05,
-    r".*ANKLE.*":      0.05,
-    # Upper body
-    r".*SHOULDER.*":   0.05,
-    r".*ELBOW.*":      0.05,
-    r".*WRIST.*":      0.1,
-    r".*HEAD.*":       0.05,
-  }
-  cfg.rewards["pose"].params["std_walking"] = {
-    # Lower body
-    r".*HIP_PITCH.*":  0.1,
-    r".*HIP_ROLL.*":   0.15,
-    r".*HIP_YAW.*":    0.15,
-    r".*KNEE.*":       0.35,
-    r".*ANKLE.*":      0.25,
-    # Upper body – arms swing during walking
-    r".*SHOULDER.*":   0.2,
-    r".*ELBOW.*":      0.2,
-    r".*WRIST.*":      0.3,
-    r".*HEAD.*":       0.1,
-  }
-  cfg.rewards["pose"].params["std_running"] = {
-    # Lower body
-    r".*HIP_PITCH.*":  0.25,
-    r".*HIP_ROLL.*":   0.25,
-    r".*HIP_YAW.*":    0.25,
-    r".*KNEE.*":       0.6,
-    r".*ANKLE.*":      0.35,
-    # Upper body
-    r".*SHOULDER.*":   0.35,
-    r".*ELBOW.*":      0.35,
-    r".*WRIST.*":      0.4,
-    r".*HEAD.*":       0.15,
-  }
+  cfg.rewards["pose"].params["asset_cfg"].joint_names = list(robot.pose_std_standing)
+  # Copies: later builders tweak these dicts in place.
+  cfg.rewards["pose"].params["std_standing"] = dict(robot.pose_std_standing)
+  cfg.rewards["pose"].params["std_walking"] = dict(robot.pose_std_walking)
+  cfg.rewards["pose"].params["std_running"] = dict(robot.pose_std_running)
 
-  cfg.rewards["upright"].params["asset_cfg"].body_names = ("BASE_LINK",)
-  cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("BASE_LINK",)
+  cfg.rewards["upright"].params["asset_cfg"].body_names = (robot.upright_body,)
+  cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = (robot.upright_body,)
 
   for reward_name in ["foot_clearance", "foot_swing_height", "foot_slip"]:
     cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
@@ -268,103 +240,26 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # the motion and discouraging high-frequency leg flapping.
   cfg.rewards["action_rate_l2"].weight = -0.25
 
-  # Penalize self-collision between the two hip abad links (prevent them
-  # from rubbing against each other to stabilise walking).
+  # Penalize the robot's self-collision pairs (hip links rubbing, feet
+  # clipping each other or the opposite shin, hands slapping thighs, ...).
   cfg.rewards.pop("self_collisions", None)
-  hip_abad_collision_cfg = ContactSensorCfg(
-    name="hip_abad_collision",
-    primary=ContactMatch(mode="body", pattern="HIP_ABAD_L", entity="robot"),
-    secondary=ContactMatch(mode="body", pattern="HIP_ABAD_R", entity="robot"),
-    fields=("found", "force"),
-    reduce="maxforce",
-    num_slots=1,
-    history_length=4,
-  )
-  cfg.rewards["hip_abad_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-1.0,
-    params={"sensor_name": hip_abad_collision_cfg.name, "force_threshold": 10.0},
-  )
-
-  # Penalize feet contact: prevent feet from touching each other during gait.
-  feet_feet_collision_cfg = ContactSensorCfg(
-    name="feet_feet_collision",
-    primary=ContactMatch(mode="geom", pattern="FOOT_L_.*", entity="robot"),
-    secondary=ContactMatch(mode="geom", pattern="FOOT_R_.*", entity="robot"),
-    fields=("found", "force"),
-    reduce="maxforce",
-    num_slots=1,
-    history_length=4,
-  )
-  cfg.rewards["feet_feet_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-1.0,
-    params={"sensor_name": feet_feet_collision_cfg.name, "force_threshold": 5.0},
-  )
-
-  # Penalize right foot hitting left tibia (cross-leg kick during swing).
-  right_foot_left_tibia_cfg = ContactSensorCfg(
-    name="right_foot_left_tibia_collision",
-    primary=ContactMatch(mode="geom", pattern="FOOT_R_.*", entity="robot"),
-    secondary=ContactMatch(mode="geom", pattern="left_tibia_collision", entity="robot"),
-    fields=("found", "force"),
-    reduce="maxforce",
-    num_slots=1,
-    history_length=4,
-  )
-  cfg.rewards["right_foot_left_tibia_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-1.0,
-    params={"sensor_name": right_foot_left_tibia_cfg.name, "force_threshold": 5.0},
-  )
-
-  # Penalize left foot hitting right tibia (cross-leg kick during swing).
-  left_foot_right_tibia_cfg = ContactSensorCfg(
-    name="left_foot_right_tibia_collision",
-    primary=ContactMatch(mode="geom", pattern="FOOT_L_.*", entity="robot"),
-    secondary=ContactMatch(mode="geom", pattern="right_tibia_collision", entity="robot"),
-    fields=("found", "force"),
-    reduce="maxforce",
-    num_slots=1,
-    history_length=4,
-  )
-  cfg.rewards["left_foot_right_tibia_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-1.0,
-    params={"sensor_name": left_foot_right_tibia_cfg.name, "force_threshold": 5.0},
-  )
-
-  # Penalize left femur hitting left upperwrist (hand slapping own thigh).
-  left_femur_wrist_cfg = ContactSensorCfg(
-    name="left_femur_wrist_collision",
-    primary=ContactMatch(mode="body", pattern="FEMUR_L", entity="robot"),
-    secondary=ContactMatch(mode="body", pattern="UPPERWRIST_L", entity="robot"),
-    fields=("found", "force"),
-    reduce="maxforce",
-    num_slots=1,
-    history_length=4,
-  )
-  cfg.rewards["left_femur_wrist_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-1.0,
-    params={"sensor_name": left_femur_wrist_cfg.name, "force_threshold": 5.0},
-  )
-
-  # Penalize right femur hitting right upperwrist (hand slapping own thigh).
-  right_femur_wrist_cfg = ContactSensorCfg(
-    name="right_femur_wrist_collision",
-    primary=ContactMatch(mode="body", pattern="FEMUR_R", entity="robot"),
-    secondary=ContactMatch(mode="body", pattern="UPPERWRIST_R", entity="robot"),
-    fields=("found", "force"),
-    reduce="maxforce",
-    num_slots=1,
-    history_length=4,
-  )
-  cfg.rewards["right_femur_wrist_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-1.0,
-    params={"sensor_name": right_femur_wrist_cfg.name, "force_threshold": 5.0},
-  )
+  self_collision_cfgs = []
+  for term in robot.self_collisions:
+    sensor_cfg = ContactSensorCfg(
+      name=term.name,
+      primary=term.primary,
+      secondary=term.secondary,
+      fields=("found", "force"),
+      reduce="maxforce",
+      num_slots=1,
+      history_length=4,
+    )
+    self_collision_cfgs.append(sensor_cfg)
+    cfg.rewards[term.name] = RewardTermCfg(
+      func=mdp.self_collision_cost,
+      weight=-1.0,
+      params={"sensor_name": term.name, "force_threshold": term.force_threshold},
+    )
 
   # Penalize feet being too close together (minimum lateral spacing).
   cfg.rewards["feet_too_near"] = RewardTermCfg(
@@ -378,15 +273,12 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # --------------- contact sensors ---------------
   # Non-foot body parts that should NOT touch the ground (illegal contact).
-  non_contact_geom_names = (
-    "trunk_collision",
-    "left_tibia_collision",
-    "right_tibia_collision",
-  )
+  non_contact_geom_names = robot.nonfoot_ground_geoms
 
   feet_ground_cfg = ContactSensorCfg(
     name="feet_ground_contact",
-    primary=ContactMatch(mode="geom", pattern=geom_names, entity="robot"),
+    # One column per foot, [left, right].
+    primary=_concat_matches(robot.left_foot_contact, robot.right_foot_contact),
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found", "force"),
     reduce="netforce",
@@ -408,7 +300,7 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # Per-foot sensors for gait-symmetry reward (L/R tracked independently).
   left_foot_ground_cfg = ContactSensorCfg(
     name="left_foot_ground",
-    primary=ContactMatch(mode="geom", pattern="left_foot_collision", entity="robot"),
+    primary=robot.left_foot_contact,
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found",),
     reduce="none",
@@ -417,7 +309,7 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
   right_foot_ground_cfg = ContactSensorCfg(
     name="right_foot_ground",
-    primary=ContactMatch(mode="geom", pattern="right_foot_collision", entity="robot"),
+    primary=robot.right_foot_contact,
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found",),
     reduce="none",
@@ -427,12 +319,7 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (
     feet_ground_cfg,
     nonfoot_ground_cfg,
-    hip_abad_collision_cfg,
-    feet_feet_collision_cfg,
-    right_foot_left_tibia_cfg,
-    left_foot_right_tibia_cfg,
-    left_femur_wrist_cfg,
-    right_femur_wrist_cfg,
+    *self_collision_cfgs,
     left_foot_ground_cfg,
     right_foot_ground_cfg,
   )
@@ -467,9 +354,11 @@ def themis_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.scene.terrain.terrain_generator.border_width = 10.0
 
   return cfg
-def themis_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Create THEMIS flat terrain velocity configuration."""
-  cfg = themis_rough_env_cfg(play=play)
+def themis_flat_env_cfg(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """Create flat terrain velocity configuration."""
+  cfg = themis_rough_env_cfg(play=play, robot=robot)
 
   # Switch to flat terrain.
   assert cfg.scene.terrain is not None
@@ -542,8 +431,8 @@ def themis_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
 
   return cfg
-# Gait clock period shared by observation and reward (seconds).
-_GAIT_PERIOD = 0.9
+# Gait clock period shared by observation, reward and MPC contact schedule:
+# ``RobotProfile.gait_period`` (seconds).
 # Per-foot phase offsets as fractions of the period.
 # [0.0, 0.5] → left foot at phase 0, right foot half a period later
 # (standard alternating biped walk).
@@ -551,10 +440,12 @@ _FOOT_OFFSETS = [0.0, 0.5]
 # sin threshold separating stance (sin < threshold) from swing (sin ≥ threshold).
 # 0.5 → exactly 50 % duty cycle; slightly above 0.5 gives small stance bias.
 _GAIT_THRESHOLD = 0.5
-def _apply_phase_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
+def _apply_phase_features(
+  cfg: ManagerBasedRlEnvCfg, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
   """Add phase observation and phase-locked gait reward to an existing cfg."""
 
-  site_names = ("left_foot", "right_foot")
+  site_names = robot.foot_sites
 
   # ── Observations: add gait-clock signal to actor input ──────────────────
   # The 2-D (sin, cos) vector lets the policy read off the current phase of
@@ -567,7 +458,7 @@ def _apply_phase_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
   cfg.observations["actor"].terms["phase"] = ObservationTermCfg(
     func=phase_mdp.phase,
     params={
-      "period": _GAIT_PERIOD,
+      "period": robot.gait_period,
       "command_name": "twist",
       "command_threshold": 0.1,
       "stance_decay": 0.95,
@@ -576,7 +467,7 @@ def _apply_phase_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
   cfg.observations["critic"].terms["phase"] = ObservationTermCfg(
     func=phase_mdp.phase_readout,
     params={
-      "period": _GAIT_PERIOD,
+      "period": robot.gait_period,
       "command_name": "twist",
     },
   )
@@ -588,13 +479,13 @@ def _apply_phase_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
   # feet_gait: reward each foot for being in contact / in the air exactly when
   # the gait clock says it should be.  Uses the combined feet_ground_contact
   # sensor whose data.found tensor has shape [B, 2] — one column per foot
-  # geom (left_foot_collision, right_foot_collision) in declaration order.
+  # foot (robot.left_foot_contact, robot.right_foot_contact) in that order.
   cfg.rewards["foot_gait"] = RewardTermCfg(
     func=phase_mdp.feet_gait,
     weight=1.0,
     params={
       "sensor_name": "feet_ground_contact",
-      "period": _GAIT_PERIOD,
+      "period": robot.gait_period,
       "offset": _FOOT_OFFSETS,
       "threshold": _GAIT_THRESHOLD,
       "command_name": "twist",
@@ -626,14 +517,16 @@ def _apply_phase_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
   #   },
   # )
 
-  # foot_clearance: target swing height matches the unitree-rl-lab default.
+  # foot_clearance: per-robot target swing height.
   cfg.rewards["foot_clearance"].weight = -4.0
-  cfg.rewards["foot_clearance"].params["target_height"] = 0.15
+  cfg.rewards["foot_clearance"].params["target_height"] = robot.swing_height
   cfg.rewards["foot_clearance"].params["asset_cfg"].site_names = site_names
 
   return cfg
-def themis_phase_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """THEMIS flat terrain config with phase-clock observation and gait reward.
+def themis_phase_flat_env_cfg(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """Flat terrain config with phase-clock observation and gait reward.
 
   Builds on :func:`themis_flat_env_cfg` and adds:
 
@@ -646,12 +539,12 @@ def themis_phase_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     non-MPC reward structure of :func:`themis_mpc_grf_v2_flat_env_cfg` so
     the two configs can be compared on shared-reward growth.
   """
-  cfg = themis_flat_env_cfg(play=play)
-  cfg = _apply_phase_features(cfg)
-  _apply_v2_shared_non_mpc_features(cfg)
+  cfg = themis_flat_env_cfg(play=play, robot=robot)
+  cfg = _apply_phase_features(cfg, robot)
+  _apply_v2_shared_non_mpc_features(cfg, robot)
   return cfg
 def _apply_v2_shared_non_mpc_features(
-  cfg: ManagerBasedRlEnvCfg,
+  cfg: ManagerBasedRlEnvCfg, robot: RobotProfile = THEMIS,
 ) -> ManagerBasedRlEnvCfg:
   """Shared non-MPC enrichments used by the v2 reward family (terrain-agnostic).
 
@@ -661,67 +554,84 @@ def _apply_v2_shared_non_mpc_features(
   :func:`themis_mpc_grf_v2_rough_env_cfg` apply this so the v2 non-MPC reward
   structure is shared across flat and rough terrains.
   """
-  cfg.rewards["pose"].params["std_walking"][r".*ANKLE.*"] = 0.15
-  cfg.rewards["pose"].params["std_running"][r".*ANKLE.*"] = 0.20
+  cfg.rewards["pose"].params["std_walking"].update(robot.ankle_std_walking)
+  cfg.rewards["pose"].params["std_running"].update(robot.ankle_std_running)
 
   cfg.rewards["foot_flat_orientation"] = RewardTermCfg(
     func=mpc_grf_mdp.foot_flat_orientation,
     weight=1.0,
     params={
-      "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+      "asset_cfg": SceneEntityCfg("robot", site_names=robot.foot_sites),
       "sigma": 0.15,
     },
   )
 
-  heel_ground_cfg = ContactSensorCfg(
-    name="heel_ground_contact",
-    primary=ContactMatch(
-      mode="geom",
-      pattern=(
-        "FOOT_L_heel_in", "FOOT_L_heel_out", "FOOT_L_heel_center",
-        "FOOT_R_heel_in", "FOOT_R_heel_out", "FOOT_R_heel_center",
-      ),
-      entity="robot",
-    ),
-    secondary=ContactMatch(mode="body", pattern="terrain"),
-    fields=("force",),
-    reduce="netforce",
-    num_slots=1,
-  )
-  toe_ground_cfg = ContactSensorCfg(
-    name="toe_ground_contact",
-    primary=ContactMatch(
-      mode="geom",
-      pattern=(
-        "FOOT_L_toe_in", "FOOT_L_toe_out", "FOOT_L_toe_in2", "FOOT_L_toe_out2",
-        "FOOT_R_toe_in", "FOOT_R_toe_out", "FOOT_R_toe_in2", "FOOT_R_toe_out2",
-      ),
-      entity="robot",
-    ),
-    secondary=ContactMatch(mode="body", pattern="terrain"),
-    fields=("force",),
-    reduce="netforce",
-    num_slots=1,
-  )
-  cfg.scene.sensors = (cfg.scene.sensors or ()) + (
-    heel_ground_cfg,
-    toe_ground_cfg,
-  )
+  if robot.heel_geoms is not None and robot.toe_geoms is not None:
+    heel_ground_cfg = ContactSensorCfg(
+      name="heel_ground_contact",
+      primary=ContactMatch(mode="geom", pattern=robot.heel_geoms, entity="robot"),
+      secondary=ContactMatch(mode="body", pattern="terrain"),
+      fields=("force",),
+      reduce="netforce",
+      num_slots=1,
+    )
+    toe_ground_cfg = ContactSensorCfg(
+      name="toe_ground_contact",
+      primary=ContactMatch(mode="geom", pattern=robot.toe_geoms, entity="robot"),
+      secondary=ContactMatch(mode="body", pattern="terrain"),
+      fields=("force",),
+      reduce="netforce",
+      num_slots=1,
+    )
+    cfg.scene.sensors = (cfg.scene.sensors or ()) + (
+      heel_ground_cfg,
+      toe_ground_cfg,
+    )
 
-  cfg.rewards["cop_forward"] = RewardTermCfg(
-    func=mpc_grf_mdp.cop_forward_reward,
-    weight=1.0,
-    params={
-      "heel_sensor_name": "heel_ground_contact",
-      "toe_sensor_name": "toe_ground_contact",
-      "target_ratio": 0.5,
-      "sigma": 0.25,
-    },
-  )
+    cfg.rewards["cop_forward"] = RewardTermCfg(
+      func=mpc_grf_mdp.cop_forward_reward,
+      weight=1.0,
+      params={
+        "heel_sensor_name": "heel_ground_contact",
+        "toe_sensor_name": "toe_ground_contact",
+        "target_ratio": 0.5,
+        "sigma": 0.25,
+      },
+    )
+  else:
+    # No split heel/toe geoms: CoP from the sole contacts' positions.  Two
+    # slots per geom — a capsule lying flat on the ground makes two contacts.
+    assert robot.cop_foot_geoms is not None
+    sole_cfgs = tuple(
+      ContactSensorCfg(
+        name=f"{side}_sole_contact",
+        primary=ContactMatch(mode="geom", pattern=geoms, entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("force", "pos"),
+        reduce="maxforce",
+        num_slots=2,
+      )
+      for side, geoms in zip(("left", "right"), robot.cop_foot_geoms, strict=True)
+    )
+    cfg.scene.sensors = (cfg.scene.sensors or ()) + sole_cfgs
+
+    cfg.rewards["cop_forward"] = RewardTermCfg(
+      func=mpc_grf_mdp.cop_forward_contact_pos_reward,
+      weight=1.0,
+      params={
+        "asset_cfg": SceneEntityCfg("robot", site_names=robot.foot_sites),
+        "left_sensor_name": "left_sole_contact",
+        "right_sensor_name": "right_sole_contact",
+        "foot_x_toe": robot.foot_x_toe,
+        "foot_x_heel": robot.foot_x_heel,
+        "target_ratio": 0.5,
+        "sigma": 0.25,
+      },
+    )
 
   return cfg
 def _apply_mpc_grf_features(
-  cfg: ManagerBasedRlEnvCfg, play: bool,
+  cfg: ManagerBasedRlEnvCfg, play: bool, robot: RobotProfile = THEMIS,
 ) -> ManagerBasedRlEnvCfg:
   """Add the v1 MPC-GRF feature stack to ``cfg`` (terrain-agnostic).
 
@@ -737,12 +647,17 @@ def _apply_mpc_grf_features(
   # policy; they serve purely as a reference for the zero-weight reward below.
   cfg.commands["loco_mpc"] = LocoMPCCommandCfg(
     debug_vis=play,
-    asset_cfg=SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+    asset_cfg=SceneEntityCfg("robot", site_names=robot.foot_sites),
     mpc_dt=0.07,            # 50 × 0.07 s = 3.5 s ≈ 5 full gait cycle lookahead
     mpc_horizon=10,
-    mass=37.0,
-    hip_width=0.15,          # ±0.1 m body-frame y offset for predicted touchdowns
-    gait_period=_GAIT_PERIOD,  # must match _GAIT_PERIOD used by the phase clock
+    mass=robot.mass,
+    inertia=robot.inertia,
+    com_height=robot.com_height,
+    foot_x_toe=robot.foot_x_toe,
+    foot_x_heel=robot.foot_x_heel,
+    foot_y_half=robot.foot_y_half,
+    hip_width=robot.hip_width,  # body-frame y offset for predicted touchdowns
+    gait_period=robot.gait_period,  # must match the phase clock period
     duty_factor=0.5,
     vel_cmd_name="twist",
     grf_sensor_name="feet_ground_contact",
@@ -799,7 +714,7 @@ def _apply_mpc_grf_features(
     func=mpc_grf_mdp.foot_flat_orientation,
     weight=0.3,
     params={
-      "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+      "asset_cfg": SceneEntityCfg("robot", site_names=robot.foot_sites),
       "sigma": 0.15,
     },
   )
@@ -818,8 +733,10 @@ def _apply_mpc_grf_features(
 
 
   return cfg
-def themis_mpc_grf_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """THEMIS phase-flat env with a centroidal locomotion MPC running in parallel.
+def themis_mpc_grf_flat_env_cfg(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """Phase-flat env with a centroidal locomotion MPC running in parallel.
 
   Inherits all of :func:`themis_phase_flat_env_cfg` (phase clock, gait reward,
   stand-still penalty, velocity curriculum) without modifying any reward
@@ -844,9 +761,13 @@ def themis_mpc_grf_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     momentum
   * Warm-started from previous solution; reset on episode termination
   """
-  return _apply_mpc_grf_features(themis_phase_flat_env_cfg(play=play), play=play)
-def themis_mpc_grf_v2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """THEMIS flat env: MPC-primary reward structure with phase-aligned contacts.
+  return _apply_mpc_grf_features(
+    themis_phase_flat_env_cfg(play=play, robot=robot), play=play, robot=robot,
+  )
+def themis_mpc_grf_v2_flat_env_cfg(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """Flat env: MPC-primary reward structure with phase-aligned contacts.
 
   Builds on :func:`themis_mpc_grf_flat_env_cfg` with a cleaner separation of
   concerns:
@@ -890,7 +811,7 @@ def themis_mpc_grf_v2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     * ``mpc_ang_mom``       +0.05 — unchanged weight; yaw q_k raised to 1.0
     * ``mpc_grf_tracking``  +0.5  — enabled (was 0.0 logging-only in v1)
   """
-  return _apply_mpc_grf_v2_features(themis_mpc_grf_flat_env_cfg(play=play))
+  return _apply_mpc_grf_v2_features(themis_mpc_grf_flat_env_cfg(play=play, robot=robot))
 def _apply_mpc_grf_v2_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
   """Apply the v2 reward overrides on top of a v1 MPC-GRF cfg (terrain-agnostic).
 
@@ -1016,8 +937,10 @@ def _apply_mpc_grf_v2_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCf
 # in push mode.  vx ∈ [0, _PUSH_BOX_VX_MAX]; ModeGatedVelocityCommand zeros
 # lin_vel_y and ang_vel_z for every push env.
 _PUSH_BOX_VX_MAX: float = 0.75
-def _themis_mpc_push_box_base(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """[Private helper] THEMIS push-box scene on top of the MPC-GRF v2 base.
+def _themis_mpc_push_box_base(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """[Private helper] Push-box scene on top of the MPC-GRF v2 base.
 
   Builds the shared push-box scaffold — box entity, mode-gated forward-only
   twist command, hand/leg contact sensors, privileged critic obs, push
@@ -1051,13 +974,18 @@ def _themis_mpc_push_box_base(play: bool = False) -> ManagerBasedRlEnvCfg:
       re-initialise during :func:`themis_training.finetune` (shape filter);
       the actor input is unchanged from the MPC-v2 actor so it loads fully.
   """
-  cfg = themis_mpc_grf_v2_flat_env_cfg(play=play)
+  cfg = themis_mpc_grf_v2_flat_env_cfg(play=play, robot=robot)
+
+  # Room for the box's ground contacts and the hand / body-box contacts on
+  # robots that tighten the per-world contact budget (THEMIS keeps mjlab's).
+  if robot.nconmax is not None:
+    cfg.sim.nconmax = robot.nconmax + 20
 
   # ── Add the box entity alongside the robot ────────────────────────────
   # Loco-manipulation tasks initialise from the loco-manip default pose
   # (arms lowered/extended for pushing); locomotion uses the walking pose.
   cfg.scene.entities = {
-    "robot": get_themis_robot_cfg(loco_manip=True),
+    "robot": robot.robot_cfg_fn(loco_manip=True),
     "box": EntityCfg(spec_fn=push_box_mdp.get_push_box_spec),
   }
 
@@ -1112,16 +1040,7 @@ def _themis_mpc_push_box_base(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
   leg_box_contact_cfg = ContactSensorCfg(
     name="leg_box_contact",
-    primary=ContactMatch(
-      mode="geom",
-      pattern=(
-        "left_tibia_collision",
-        "right_tibia_collision",
-        "left_foot_collision",
-        "right_foot_collision",
-      ),
-      entity="robot",
-    ),
+    primary=ContactMatch(mode="geom", pattern=robot.leg_geoms, entity="robot"),
     secondary=ContactMatch(mode="geom", pattern="box_geom", entity="box"),
     fields=("found",),
     reduce="none",
@@ -1306,8 +1225,10 @@ def _themis_mpc_push_box_base(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
 
   return cfg
-def themis_loco_manip_mpc_push_box_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """THEMIS push-box env with the loco-manipulation MPC (hand forces).
+def themis_loco_manip_mpc_push_box_flat_env_cfg(
+  play: bool = False, robot: RobotProfile = THEMIS,
+) -> ManagerBasedRlEnvCfg:
+  """Push-box env with the loco-manipulation MPC (hand forces).
 
   Builds on :func:`_themis_mpc_push_box_base` and replaces the
   locomotion-only ``LocoMPCCommand`` with :class:`LocoManipMPCCommand`,
@@ -1329,25 +1250,14 @@ def themis_loco_manip_mpc_push_box_flat_env_cfg(play: bool = False) -> ManagerBa
   inside the ``LOWERWRIST_L_contact`` / ``LOWERWRIST_R_contact`` bodies
   (already added to ``themis_29dof.xml``).
   """
-  cfg = _themis_mpc_push_box_base(play=play)
+  cfg = _themis_mpc_push_box_base(play=play, robot=robot)
 
   # ── All-body robot-box net-force sensor (non-hand geoms) ─────────────
   # Pattern covers legs / torso collision geoms; hand_contact_* are intentionally
   # excluded so that subtracting hand forces gives a clean other-body estimate.
   body_box_contact_cfg = ContactSensorCfg(
     name="body_box_contact",
-    primary=ContactMatch(
-      mode="geom",
-      pattern=(
-        "left_tibia_collision",
-        "right_tibia_collision",
-        "left_foot_collision",
-        "right_foot_collision",
-        "left_upperarm_collision",
-        "right_upperarm_collision",
-      ),
-      entity="robot",
-    ),
+    primary=ContactMatch(mode="geom", pattern=robot.body_box_geoms, entity="robot"),
     secondary=ContactMatch(mode="geom", pattern="box_geom", entity="box"),
     fields=("force",),
     reduce="netforce",
@@ -1361,8 +1271,14 @@ def themis_loco_manip_mpc_push_box_flat_env_cfg(play: bool = False) -> ManagerBa
     debug_vis=play,
     mpc_dt=0.07,
     mpc_horizon=10,          # 10 × 0.07 s = 0.7 s lookahead (~1 gait cycle)
-    mass=37.0,
-    gait_period=_GAIT_PERIOD,
+    mass=robot.mass,
+    inertia=robot.inertia,
+    com_height=robot.com_height,
+    foot_x_toe=robot.foot_x_toe,
+    foot_x_heel=robot.foot_x_heel,
+    foot_y_half=robot.foot_y_half,
+    hip_width=robot.loco_manip_hip_width,
+    gait_period=robot.gait_period,
     run_every_n_steps=5,     # MPC runs at policy rate (50 Hz)
     # Hand geometry
     hand_site_names=("left_hand", "right_hand"),
@@ -1442,9 +1358,7 @@ def themis_loco_manip_mpc_push_box_flat_env_cfg(play: bool = False) -> ManagerBa
   pose_params = cfg.rewards["pose"].params
   for std_key in ("std_walking", "std_running"):
     if std_key in pose_params:
-      pose_params[std_key][r".*SHOULDER.*"] = 0.05
-      pose_params[std_key][r".*ELBOW.*"]    = 0.05
-      pose_params[std_key][r".*WRIST.*"]    = 0.10
+      pose_params[std_key].update(robot.arm_std_loco_manip)
   cfg.rewards["pose"].weight = 5.0
 
   # ── Arm/neck deviation termination ────────────────────────────────────
@@ -1455,8 +1369,9 @@ def themis_loco_manip_mpc_push_box_flat_env_cfg(play: bool = False) -> ManagerBa
   cfg.terminations["arm_joint_deviation"] = TerminationTermCfg(
     func=push_box_mdp.arm_joint_deviation,
     params={
-      "max_deviation_rad": 0.25,
+      "max_deviation_rad": robot.arm_max_deviation,
       "robot_name": "robot",
+      "joint_names": robot.arm_joint_exprs,
     },
   )
 

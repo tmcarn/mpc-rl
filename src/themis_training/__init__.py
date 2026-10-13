@@ -1,13 +1,13 @@
-"""MPC-guided RL training tasks for the Westwood Robotics THEMIS humanoid.
+"""MPC-guided RL training tasks for the Westwood Robotics THEMIS and Unitree G1 humanoids.
 
-Registers two tasks with mjlab:
+Registers two tasks per robot with mjlab (``<Robot>`` = ``Themis`` | ``G1``):
 
-* ``Mjlab-MPC-Guided-Locomotion-Themis`` — MPC-guided velocity locomotion.
+* ``Mjlab-MPC-Guided-Locomotion-<Robot>`` — MPC-guided velocity locomotion.
   A centroidal QP-MPC runs in parallel with the policy at the policy rate and
   supplies CoM / angular-momentum / GRF / foot-placement reference targets that
   shape the reward (solver: batched JAX PiMPC).
 
-* ``Mjlab-MPC-Guided-Loco-manipulation-Themis`` — MPC-guided
+* ``Mjlab-MPC-Guided-Loco-manipulation-<Robot>`` — MPC-guided
   loco-manipulation. Extends the locomotion task with a box-pushing scene and
   swaps the locomotion-only MPC for the loco-manipulation MPC that also solves
   for hand push forces (solver: batched PyTorch PiMPC).
@@ -21,21 +21,23 @@ from .env_cfgs import (
   themis_mpc_grf_v2_flat_env_cfg,
 )
 from .rl_cfg import themis_ppo_runner_cfg
+from .robots import G1, THEMIS
 
-# ── MPC-guided velocity locomotion ──────────────────────────────────────────
-register_mjlab_task(
-  task_id="Mjlab-MPC-Guided-Locomotion-Themis",
-  env_cfg=themis_mpc_grf_v2_flat_env_cfg(),
-  play_env_cfg=themis_mpc_grf_v2_flat_env_cfg(play=True),
-  rl_cfg=themis_ppo_runner_cfg(),
-  runner_cls=VelocityOnPolicyRunner,
-)
+for _robot in (THEMIS, G1):
+  # ── MPC-guided velocity locomotion ────────────────────────────────────────
+  register_mjlab_task(
+    task_id=f"Mjlab-MPC-Guided-Locomotion-{_robot.name}",
+    env_cfg=themis_mpc_grf_v2_flat_env_cfg(robot=_robot),
+    play_env_cfg=themis_mpc_grf_v2_flat_env_cfg(play=True, robot=_robot),
+    rl_cfg=themis_ppo_runner_cfg(_robot.experiment_name),
+    runner_cls=VelocityOnPolicyRunner,
+  )
 
-# ── MPC-guided loco-manipulation (box pushing) ──────────────────────────────
-register_mjlab_task(
-  task_id="Mjlab-MPC-Guided-Loco-manipulation-Themis",
-  env_cfg=themis_loco_manip_mpc_push_box_flat_env_cfg(),
-  play_env_cfg=themis_loco_manip_mpc_push_box_flat_env_cfg(play=True),
-  rl_cfg=themis_ppo_runner_cfg(),
-  runner_cls=VelocityOnPolicyRunner,
-)
+  # ── MPC-guided loco-manipulation (box pushing) ────────────────────────────
+  register_mjlab_task(
+    task_id=f"Mjlab-MPC-Guided-Loco-manipulation-{_robot.name}",
+    env_cfg=themis_loco_manip_mpc_push_box_flat_env_cfg(robot=_robot),
+    play_env_cfg=themis_loco_manip_mpc_push_box_flat_env_cfg(play=True, robot=_robot),
+    rl_cfg=themis_ppo_runner_cfg(_robot.experiment_name),
+    runner_cls=VelocityOnPolicyRunner,
+  )

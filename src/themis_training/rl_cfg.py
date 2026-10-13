@@ -1,4 +1,4 @@
-"""RL configurations for THEMIS tasks."""
+"""RL configurations for the MPC-guided tasks."""
 
 from mjlab.rl import (
   RslRlModelCfg,
@@ -7,8 +7,8 @@ from mjlab.rl import (
 )
 
 
-def themis_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
-  """Create RL runner configuration for THEMIS velocity task."""
+def themis_ppo_runner_cfg(experiment_name: str = "themis_velocity") -> RslRlOnPolicyRunnerCfg:
+  """Create RL runner configuration for the MPC-guided velocity tasks."""
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
       hidden_dims=(512, 256, 128),
@@ -20,7 +20,7 @@ def themis_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     algorithm=RslRlPpoAlgorithmCfg(
       entropy_coef=0.01,
     ),
-    experiment_name="themis_velocity",
+    experiment_name=experiment_name,
     max_iterations=10_000,
     save_interval=500,
   )

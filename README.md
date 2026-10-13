@@ -35,6 +35,15 @@ proposed batch MPC solver **$\pi^n$ MPC** in JAX and PyTorch.
 |---|---|
 | `Mjlab-MPC-Guided-Locomotion-Themis` | MPC-guided velocity locomotion on flat terrain. |
 | `Mjlab-MPC-Guided-Loco-manipulation-Themis` | MPC-guided loco-manipulation — walking and pushing a box. |
+| `Mjlab-MPC-Guided-Locomotion-G1` | Same locomotion task on the Unitree G1 (29 DOF). |
+| `Mjlab-MPC-Guided-Loco-manipulation-G1` | Same loco-manipulation task on the Unitree G1. |
+
+The tasks are built per robot from a `RobotProfile` in
+[`robots.py`](src/themis_training/robots.py): body / site / geom names, joint
+groups and pose-reward stds, and the centroidal-MPC model (mass, inertia, sole
+size, hip width, gait period). The G1 uses mjlab's bundled G1 model and actuators
+([`g1_constants.py`](src/themis_training/g1/g1_constants.py)), plus added hand
+contact spheres, hand sites, and a chest-camera site for the box-pushing task.
 
 ## Setup
 
@@ -61,6 +70,19 @@ CUDA_VISIBLE_DEVICES=0 uv run train Mjlab-MPC-Guided-Locomotion-Themis \
 CUDA_VISIBLE_DEVICES=0 uv run train Mjlab-MPC-Guided-Loco-manipulation-Themis \
   --env.scene.num-envs 4096 \
   --agent.max-iterations 25000
+```
+
+For the G1, swap the `-Themis` suffix for `-G1`; runs are logged under
+`logs/rsl_rl/g1_velocity/`. To start loco-manipulation from a trained locomotion
+policy, use the `finetune` entry point. It loads the checkpoint non-strictly, so
+critic layers that changed shape are re-initialised:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run finetune Mjlab-MPC-Guided-Loco-manipulation-G1 \
+  --env.scene.num-envs 4096 \
+  --agent.resume True \
+  --agent.load-run "<g1 locomotion run dir>" \
+  --agent.load-checkpoint model_14999.pt
 ```
 
 Resume from a checkpoint (regex match on the run-directory timestamp; omit
