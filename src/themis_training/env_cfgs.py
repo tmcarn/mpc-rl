@@ -1046,11 +1046,20 @@ def _themis_mpc_push_box_base(
     reduce="none",
     num_slots=1,
   )
+  arm_box_contact_cfg = ContactSensorCfg(
+    name="arm_box_contact",
+    primary=ContactMatch(mode="geom", pattern=robot.arm_box_geoms, entity="robot"),
+    secondary=ContactMatch(mode="geom", pattern="box_geom", entity="box"),
+    fields=("found",),
+    reduce="none",
+    num_slots=1,
+  )
 
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (
     lhand_box_contact_cfg,
     rhand_box_contact_cfg,
     leg_box_contact_cfg,
+    arm_box_contact_cfg,
   )
 
   # ── Privileged critic observations (NO chest point cloud) ─────────────
@@ -1157,6 +1166,11 @@ def _themis_mpc_push_box_base(
     func=push_box_mdp.leg_box_collision_cost,
     weight=-1.0,
     params={"sensor_name": "leg_box_contact"},
+  )
+  cfg.rewards["arm_box_collision"] = RewardTermCfg(
+    func=push_box_mdp.arm_box_collision_cost,
+    weight=-2.0,
+    params={"sensor_name": "arm_box_contact"},
   )
   cfg.rewards["hand_slip"] = RewardTermCfg(
     func=push_box_mdp.HandSlipPenalty,

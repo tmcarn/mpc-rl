@@ -63,6 +63,7 @@ class RobotProfile:
   self_collisions: tuple[SelfCollisionTerm, ...]
   nonfoot_ground_geoms: tuple[str, ...]  # illegal-contact termination
   leg_geoms: tuple[str, ...]             # leg-box collision penalty
+  arm_box_geoms: tuple[str, ...]         # non-hand arm geoms for box penalty
   body_box_geoms: tuple[str, ...]        # non-hand robot-box net force (MPC)
 
   # ── Joint groups / pose reward ──
@@ -163,6 +164,7 @@ THEMIS = RobotProfile(
     "left_foot_collision",
     "right_foot_collision",
   ),
+  arm_box_geoms=("left_upperarm_collision", "right_upperarm_collision"),
   body_box_geoms=(
     "left_tibia_collision",
     "right_tibia_collision",
@@ -286,6 +288,12 @@ G1 = RobotProfile(
     "left_shin_collision",
     "right_shin_collision",
   ) + _G1_FOOT_GEOMS[0] + _G1_FOOT_GEOMS[1],
+  arm_box_geoms=(
+    "left_shoulder_yaw_collision",
+    "right_shoulder_yaw_collision",
+    "left_elbow_yaw_collision",
+    "right_elbow_yaw_collision",
+  ),
   body_box_geoms=(
     "left_thigh_collision",
     "right_thigh_collision",

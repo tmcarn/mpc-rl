@@ -347,6 +347,16 @@ def leg_box_collision_cost(
     hit = (sensor.data.found > 0).any(dim=-1).float()
     return hit * _push_mask(env).float()
 
+def arm_box_collision_cost(
+    env: "ManagerBasedRlEnv",
+    sensor_name: str = "arm_box_contact",
+) -> Tensor:
+    """Penalty when non-hand arm geoms touch the box."""
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    hit = (sensor.data.found > 0).any(dim=-1).float()
+    return hit * _push_mask(env).float()
+
 class HandSlipPenalty:
     """Stateful penalty for losing hand-box contact mid-push."""
 
