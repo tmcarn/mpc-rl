@@ -1162,14 +1162,17 @@ def _themis_mpc_push_box_base(
       "robot_name": "robot",
     },
   )
+  # Leg / arm contact penalties are sized against the contact-gated push
+  # rewards (~13 per step while a hand touches the box), so bracing on the
+  # box with a shin or forearm alongside the hands is not worth it.
   cfg.rewards["leg_box_collision"] = RewardTermCfg(
     func=push_box_mdp.leg_box_collision_cost,
-    weight=-1.0,
+    weight=-4.0,
     params={"sensor_name": "leg_box_contact"},
   )
   cfg.rewards["arm_box_collision"] = RewardTermCfg(
     func=push_box_mdp.arm_box_collision_cost,
-    weight=-2.0,
+    weight=-6.0,
     params={"sensor_name": "arm_box_contact"},
   )
   cfg.rewards["hand_slip"] = RewardTermCfg(
