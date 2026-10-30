@@ -284,9 +284,17 @@ G1 = RobotProfile(
     "left_shin_collision",
     "right_shin_collision",
   ),
+  # Every leg collision geom: the shin capsule only covers the upper half of
+  # the lower leg; the linkage brace covers the rest down to the ankle.
   leg_geoms=(
+    "left_hip_collision",
+    "right_hip_collision",
+    "left_thigh_collision",
+    "right_thigh_collision",
     "left_shin_collision",
     "right_shin_collision",
+    "left_linkage_brace_collision",
+    "right_linkage_brace_collision",
   ) + _G1_FOOT_GEOMS[0] + _G1_FOOT_GEOMS[1],
   arm_box_geoms=(
     "left_shoulder_yaw_collision",
@@ -295,10 +303,14 @@ G1 = RobotProfile(
     "right_elbow_yaw_collision",
   ),
   body_box_geoms=(
+    "left_hip_collision",
+    "right_hip_collision",
     "left_thigh_collision",
     "right_thigh_collision",
     "left_shin_collision",
     "right_shin_collision",
+    "left_linkage_brace_collision",
+    "right_linkage_brace_collision",
     "torso_collision",
     "left_shoulder_yaw_collision",
     "right_shoulder_yaw_collision",
