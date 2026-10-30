@@ -95,6 +95,23 @@ CUDA_VISIBLE_DEVICES=0 uv run train Mjlab-MPC-Guided-Locomotion-Themis \
   --agent.load-checkpoint model_5000.pt
 ```
 
+Full Run:
+```
+cd ~/Documents/hutchinson-lab/mpc-rl
+WANDB_USERNAME=theo_mcarn CUDA_VISIBLE_DEVICES=0 uv run train Mjlab-MPC-Guided-Loco-manipulation-G1 \
+  --env.scene.num-envs 4096 \
+  --agent.resume True \
+  --agent.load-run "<log dir>" \
+  --agent.load-checkpoint model_24999.pt \
+  --agent.max-iterations 25000 \
+  --agent.wandb-project g1-mpc-rl \
+  --agent.run-name <run_name> \
+  --video True \
+  --video-interval 24000 \
+  --video-length 500
+
+```
+
 Play back a trained policy:
 
 ```bash
